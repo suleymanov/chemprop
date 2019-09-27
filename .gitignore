@@ -1,3 +1,4 @@
+*.ipynb_checkpoints
 *.pyc
 *.idea
 *.DS_Store
@@ -9,3 +10,4 @@
 *.sqlite3
 chemprop.egg-info
 docs/build
+*.log

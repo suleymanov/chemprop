@@ -8,6 +8,7 @@ from tensorboardX import SummaryWriter
 import torch
 from tqdm import trange
 from torch.optim.lr_scheduler import ExponentialLR
+import random
 
 from .evaluate import evaluate, evaluate_predictions
 from .predict import predict
@@ -17,8 +18,10 @@ from chemprop.constants import MODEL_FILE_NAME
 from chemprop.data import get_class_sizes, get_data, MoleculeDataLoader, split_data, StandardScaler, validate_dataset_type
 from chemprop.models import MoleculeModel
 from chemprop.nn_utils import param_count
-from chemprop.utils import build_optimizer, build_lr_scheduler, get_loss_func, get_metric_func, load_checkpoint,\
-    makedirs, save_checkpoint, save_smiles_splits
+from chemprop.utils import (
+    build_optimizer, build_lr_scheduler, build_model,
+    get_loss_func, get_metric_func, load_checkpoint, makedirs, save_checkpoint, save_smiles_splits
+)
 
 
 def run_training(args: TrainArgs, logger: Logger = None) -> List[float]:
@@ -155,6 +158,8 @@ def run_training(args: TrainArgs, logger: Logger = None) -> List[float]:
 
     if args.class_balance:
         debug(f'With class_balance, effective train size = {train_data_loader.iter_size:,}')
+    if args.bootstrap:
+        all_train_data = train_data
 
     # Train ensemble of models
     for model_idx in range(args.ensemble_size):
@@ -165,14 +170,24 @@ def run_training(args: TrainArgs, logger: Logger = None) -> List[float]:
             writer = SummaryWriter(log_dir=save_dir)
         except:
             writer = SummaryWriter(logdir=save_dir)
-
+        # Bootstrap training dataset
+        if args.bootstrap:
+            model_seed = args.seed + model_idx
+            train_data = MoleculeDataset(random.Random(model_seed).choices(all_train_data.data, k=len(all_train_data)))
+            if args.save_smiles_splits:
+                with open(os.path.join(save_dir, 'bootstrap_smiles.csv'), 'w') as f:
+                    writer_bootstrap = csv.writer(f)
+                    writer_bootstrap.writerow(['smiles'])
+                    for smiles in train_data.smiles():
+                        writer_bootstrap.writerow([smiles])
         # Load/build model
         if args.checkpoint_paths is not None:
             debug(f'Loading model {model_idx} from {args.checkpoint_paths[model_idx]}')
             model = load_checkpoint(args.checkpoint_paths[model_idx], logger=logger)
         else:
             debug(f'Building model {model_idx}')
-            model = MoleculeModel(args)
+            # model = MoleculeModel(args)
+            model = build_model(args)
 
         debug(model)
         debug(f'Number of parameters = {param_count(model):,}')
@@ -181,7 +196,10 @@ def run_training(args: TrainArgs, logger: Logger = None) -> List[float]:
         model = model.to(args.device)
 
         # Ensure that model is saved in correct location for evaluation if 0 epochs
-        save_checkpoint(os.path.join(save_dir, MODEL_FILE_NAME), model, scaler, features_scaler, args)
+        if args.scheduler != 'sgdr':
+            save_checkpoint(os.path.join(save_dir, 'model.pt'), model, scaler, features_scaler, args)
+        else:
+            save_checkpoint(os.path.join(save_dir, 'model0.pt'), model, scaler, features_scaler, args)
 
         # Optimizers
         optimizer = build_optimizer(model, args)
@@ -202,6 +220,7 @@ def run_training(args: TrainArgs, logger: Logger = None) -> List[float]:
                 optimizer=optimizer,
                 scheduler=scheduler,
                 args=args,
+                epoch=epoch,
                 n_iter=n_iter,
                 logger=logger,
                 writer=writer
@@ -213,9 +232,11 @@ def run_training(args: TrainArgs, logger: Logger = None) -> List[float]:
                 data_loader=val_data_loader,
                 num_tasks=args.num_tasks,
                 metric_func=metric_func,
+                batch_size=args.batch_size,
                 dataset_type=args.dataset_type,
                 scaler=scaler,
-                logger=logger
+                logger=logger,
+                sampling_size=args.sampling_size,
             )
 
             # Average validation score
@@ -233,17 +254,44 @@ def run_training(args: TrainArgs, logger: Logger = None) -> List[float]:
             if args.minimize_score and avg_val_score < best_score or \
                     not args.minimize_score and avg_val_score > best_score:
                 best_score, best_epoch = avg_val_score, epoch
-                save_checkpoint(os.path.join(save_dir, MODEL_FILE_NAME), model, scaler, features_scaler, args)
+                if args.scheduler != 'sgdr':
+                    save_checkpoint(os.path.join(save_dir, 'model.pt'), model, scaler, features_scaler, args)
+            if args.scheduler == 'sgdr' and (epoch+1) % args.snapshot_ensembles == 0:
+                n_snapshot_ensemble = int(((epoch+1) / args.snapshot_ensembles) - 1)
+                save_checkpoint(os.path.join(save_dir, f'model{n_snapshot_ensemble}.pt'), model, scaler, features_scaler, args)
 
         # Evaluate on test set using model with best validation score
         info(f'Model {model_idx} best validation {args.metric} = {best_score:.6f} on epoch {best_epoch}')
-        model = load_checkpoint(os.path.join(save_dir, MODEL_FILE_NAME), device=args.device, logger=logger)
 
-        test_preds = predict(
-            model=model,
-            data_loader=test_data_loader,
-            scaler=scaler
-        )
+        # A single training leads to one model
+        if args.scheduler != 'sgdr':
+            model = load_checkpoint(os.path.join(save_dir, 'model.pt'), logger=logger)
+            # Get only the predictions (first entry)
+            test_preds = predict(
+                model=model,
+                data_loader=test_data_loader,
+                batch_size=args.batch_size,
+                scaler=scaler,
+                sampling_size=args.sampling_size
+            )[0]
+
+        # A single training leads to an ensemble of models
+        else:
+            sum_preds = np.zeros((len(test_data), args.num_tasks))
+
+            print(f'Predicting with an ensemble of {args.snapshot_ensemble_size} models')
+            for index in range(args.snapshot_ensemble_size):
+                model = load_checkpoint(os.path.join(save_dir, f'model{index}.pt'), logger=logger)
+                model_preds = predict(
+                    model=model,
+                    data_loader=test_data_loader,
+                    batch_size=args.batch_size,
+                    scaler=scaler,
+                    sampling_size=args.sampling_size
+                )[0]
+                sum_preds += np.array(model_preds)
+            test_preds = sum_preds/args.snapshot_ensemble_size
+
         test_scores = evaluate_predictions(
             preds=test_preds,
             targets=test_targets,

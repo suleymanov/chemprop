@@ -242,6 +242,18 @@ class TrainArgs(CommonArgs):
     """Maximum magnitude of gradient during training."""
     class_balance: bool = False
     """Trains with an equal number of positives and negatives in each batch (only for single task classification)."""
+    bootstrap: bool = False
+    """Use a bootstrap sample instead of full train dataset."""
+    aleatoric: bool = False
+    """Compute aleatoric uncertainty."""
+    epistemic: bool = False
+    """Compute epistemic uncertainty with a specified method."""
+    regularization_scale: float = 1e-4
+    """Concrete dropout regularization scale."""
+    sampling_size: int = 20
+    """Sampling size for MC-Dropout."""
+    scheduler: Literal['noam', 'sgdr'] = 'noam'
+    """Scheduler type."""
 
     def __init__(self, *args, **kwargs) -> None:
         super(TrainArgs, self).__init__(*args, **kwargs)
@@ -384,6 +396,10 @@ class PredictArgs(CommonArgs):
     """Path to CSV file containing testing data for which predictions will be made."""
     preds_path: str
     """Path to CSV file where predictions will be saved."""
+    sampling_size: int = 20
+    """Sampling size for MC-Dropout."""
+    estimate_variance: bool = False
+    """Compute ensemble variance as uncertainty estimation."""
 
     @property
     def ensemble_size(self) -> int:

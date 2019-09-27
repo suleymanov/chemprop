@@ -11,7 +11,7 @@ from tqdm import tqdm
 from chemprop.args import TrainArgs
 from chemprop.data import MoleculeDataLoader, MoleculeDataset
 from chemprop.models import MoleculeModel
-from chemprop.nn_utils import compute_gnorm, compute_pnorm, NoamLR
+from chemprop.nn_utils import compute_gnorm, compute_pnorm, NoamLR, CosineAnnealingWarmRestarts
 
 
 def train(model: MoleculeModel,
@@ -20,6 +20,7 @@ def train(model: MoleculeModel,
           optimizer: Optimizer,
           scheduler: _LRScheduler,
           args: TrainArgs,
+          epoch: int = 1,
           n_iter: int = 0,
           logger: logging.Logger = None,
           writer: SummaryWriter = None) -> int:
@@ -32,6 +33,7 @@ def train(model: MoleculeModel,
     :param optimizer: An optimizer.
     :param scheduler: A learning rate scheduler.
     :param args: A :class:`~chemprop.args.TrainArgs` object containing arguments for training the model.
+    :param epoch: Epoch.
     :param n_iter: The number of iterations (training examples) trained on so far.
     :param logger: A logger for recording output.
     :param writer: A tensorboardX SummaryWriter.
@@ -49,21 +51,30 @@ def train(model: MoleculeModel,
         mask = torch.Tensor([[x is not None for x in tb] for tb in target_batch])
         targets = torch.Tensor([[0 if x is None else x for x in tb] for tb in target_batch])
 
+        class_weights = torch.ones(targets.shape)
+        if args.cuda:
+            class_weights = class_weights.cuda()
+
         # Run model
         model.zero_grad()
-        preds = model(mol_batch, features_batch)
 
-        # Move tensors to correct device
-        mask = mask.to(preds.device)
-        targets = targets.to(preds.device)
-        class_weights = torch.ones(targets.shape, device=preds.device)
+        if not args.aleatoric:
+            preds = model(mol_batch, features_batch)
 
-        if args.dataset_type == 'multiclass':
-            targets = targets.long()
-            loss = torch.cat([loss_func(preds[:, target_index, :], targets[:, target_index]).unsqueeze(1) for target_index in range(preds.size(1))], dim=1) * class_weights * mask
+            if args.dataset_type == 'multiclass':
+                targets = targets.long()
+                loss = torch.cat([loss_func(preds[:, target_index, :], targets[:, target_index]).unsqueeze(1) for target_index in range(preds.size(1))], dim=1) * class_weights * mask
+            else:
+                loss = loss_func(preds, targets) * class_weights * mask
         else:
-            loss = loss_func(preds, targets) * class_weights * mask
+            means, logvars = model(mol_batch, features_batch)
+            loss = loss_func(targets, means, logvars) * class_weights * mask
+
         loss = loss.sum() / mask.sum()
+
+        if args.epistemic == 'mc_dropout':
+            reg_loss = args.reg_acc.get_sum()
+            loss += reg_loss
 
         loss_sum += loss.item()
         iter_count += len(batch)
@@ -75,6 +86,8 @@ def train(model: MoleculeModel,
 
         if isinstance(scheduler, NoamLR):
             scheduler.step()
+        if isinstance(scheduler, CosineAnnealingWarmRestarts):
+            scheduler.step(epoch + i / num_iters)
 
         n_iter += len(batch)
 

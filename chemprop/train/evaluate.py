@@ -70,7 +70,9 @@ def evaluate(model: MoleculeModel,
              data_loader: MoleculeDataLoader,
              num_tasks: int,
              metric_func: Callable,
+             batch_size: int,
              dataset_type: str,
+             sampling_size: int,
              scaler: StandardScaler = None,
              logger: logging.Logger = None) -> List[float]:
     """
@@ -83,13 +85,18 @@ def evaluate(model: MoleculeModel,
     :param dataset_type: Dataset type.
     :param scaler: A :class:`~chemprop.features.scaler.StandardScaler` object fit on the training targets.
     :param logger: A logger to record output.
+    :param sampling_size: int
     :return: A list with the score for each task based on :code:`metric_func`.
     """
+
+    # Get only the predictions (first entry)
     preds = predict(
         model=model,
         data_loader=data_loader,
-        scaler=scaler
-    )
+        batch_size=batch_size,
+        scaler=scaler,
+        sampling_size=sampling_size
+    )[0]
 
     results = evaluate_predictions(
         preds=preds,

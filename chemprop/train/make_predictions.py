@@ -82,10 +82,16 @@ def make_predictions(args: PredictArgs, smiles: List[str] = None) -> List[List[O
     # Predict with each model individually and sum predictions
     if args.dataset_type == 'multiclass':
         sum_preds = np.zeros((len(test_data), num_tasks, args.multiclass_num_classes))
+        sum_ale_uncs = np.zeros((len(test_data), num_tasks, args.multiclass_num_classes))
+        sum_epi_uncs = np.zeros((len(test_data), num_tasks, args.multiclass_num_classes))
     else:
         sum_preds = np.zeros((len(test_data), num_tasks))
+        sum_ale_uncs = np.zeros((len(test_data), num_tasks))
+        sum_epi_uncs = np.zeros((len(test_data), num_tasks))
 
-    # Create data loader
+    # Partial results for variance robust calculation.
+    all_preds = np.zeros((len(test_data), num_tasks, len(args.checkpoint_paths)))
+
     test_data_loader = MoleculeDataLoader(
         dataset=test_data,
         batch_size=args.batch_size,
@@ -93,46 +99,101 @@ def make_predictions(args: PredictArgs, smiles: List[str] = None) -> List[List[O
     )
 
     print(f'Predicting with an ensemble of {len(args.checkpoint_paths)} models')
-    for checkpoint_path in tqdm(args.checkpoint_paths, total=len(args.checkpoint_paths)):
+    for index, checkpoint_path in enumerate(tqdm(args.checkpoint_paths, total=len(args.checkpoint_paths))):
         # Load model
-        model = load_checkpoint(checkpoint_path, device=args.device)
-        model_preds = predict(
+        model = load_checkpoint(checkpoint_path)
+        model_preds, ale_uncs, epi_uncs = predict(
             model=model,
             data_loader=test_data_loader,
-            scaler=scaler
+            batch_size=args.batch_size,
+            scaler=scaler,
+            sampling_size=args.sampling_size
         )
         sum_preds += np.array(model_preds)
+        if ale_uncs is not None:
+            sum_ale_uncs += np.array(ale_uncs)
+        if epi_uncs is not None:
+            sum_epi_uncs += np.array(epi_uncs)
+        if args.estimate_variance:
+            all_preds[:, :, index] = model_preds
 
-    # Ensemble predictions
     avg_preds = sum_preds / len(args.checkpoint_paths)
     avg_preds = avg_preds.tolist()
+    avg_ale_uncs = sum_ale_uncs / len(args.checkpoint_paths)
+    avg_ale_uncs = avg_ale_uncs.tolist()
+    if args.estimate_variance:
+        # Use ensemble variance to estimate uncertainty. This overwrites existing uncertainty estimates.
+        # preds <- mean(preds), ale_uncs <- mean(ale_uncs), epi_uncs <- var(preds)
+        avg_epi_uncs = np.var(all_preds, axis=2)
+        avg_epi_uncs = avg_epi_uncs.tolist()
+    else:
+        # Use another method to estimate uncertainty.
+        # preds <- mean(preds), ale_uncs <- mean(ale_uncs), epi_uncs <- mean(epi_uncs)
+        avg_epi_uncs = sum_epi_uncs / len(args.checkpoint_paths)
+        avg_epi_uncs = avg_epi_uncs.tolist()
 
     # Save predictions
-    print(f'Saving predictions to {args.preds_path}')
     assert len(test_data) == len(avg_preds)
+    assert len(test_data) == len(avg_ale_uncs)
+    assert len(test_data) == len(avg_epi_uncs)
+
+    print(f'Saving predictions to {args.preds_path}')
     makedirs(args.preds_path, isfile=True)
 
-    # Get prediction column names
-    if args.dataset_type == 'multiclass':
-        task_names = [f'{name}_class_{i}' for name in task_names for i in range(args.multiclass_num_classes)]
-    else:
-        task_names = task_names
+    # Put Nones for invalid smiles
+    full_preds = [None] * len(full_data)
+    full_ale_uncs = [None] * len(full_data)
+    full_epi_uncs = [None] * len(full_data)
 
-    # Copy predictions over to full_data
-    for full_index, datapoint in enumerate(full_data):
-        valid_index = full_to_valid_indices.get(full_index, None)
-        preds = avg_preds[valid_index] if valid_index is not None else ['Invalid SMILES'] * len(task_names)
+    for i, si in full_to_valid_indices.items():
+        full_preds[si] = avg_preds[i]
+        full_ale_uncs[si] = avg_ale_uncs[i]
+        full_epi_uncs[si] = avg_epi_uncs[i]
 
-        for pred_name, pred in zip(task_names, preds):
-            datapoint.row[pred_name] = pred
+    avg_preds = full_preds
+    avg_ale_uncs = full_ale_uncs
+    avg_epi_uncs = full_epi_uncs
 
-    # Save
+    test_smiles = full_data.smiles()
+
+    # Write predictions
     with open(args.preds_path, 'w') as f:
-        writer = csv.DictWriter(f, fieldnames=full_data[0].row.keys())
-        writer.writeheader()
+        writer = csv.writer(f)
 
-        for datapoint in full_data:
-            writer.writerow(datapoint.row)
+        header = []
+        header.append('smiles')
+
+        if args.dataset_type == 'multiclass':
+            for name in task_names:
+                for i in range(args.multiclass_num_classes):
+                    header.append(name + '_class' + str(i))
+        else:
+            header.extend(task_names)
+            header.extend([tn + "_ale_unc" for tn in task_names])
+            header.extend([tn + "_epi_unc" for tn in task_names])
+
+        writer.writerow(header)
+
+        for i in range(len(avg_preds)):
+            row = []
+            row.append(test_smiles[i])
+
+            if avg_preds[i] is not None:
+                if args.dataset_type == 'multiclass':
+                    for task_probs in avg_preds[i]:
+                        row.extend(task_probs)
+                else:
+                    row.extend(avg_preds[i])
+                    row.extend(avg_ale_uncs[i])
+                    row.extend(avg_epi_uncs[i])
+            else:
+                if args.dataset_type == 'multiclass':
+                    row.extend([''] * num_tasks * args.multiclass_num_classes)
+                else:
+                    # Both the prediction, the aleatoric uncertainty and the epistemic uncertainty are None
+                    row.extend([''] * 3 * num_tasks)
+
+            writer.writerow(row)
 
     return avg_preds
 

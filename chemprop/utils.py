@@ -19,8 +19,8 @@ from torch.optim.lr_scheduler import _LRScheduler
 
 from chemprop.args import TrainArgs
 from chemprop.data import StandardScaler, MoleculeDataset
-from chemprop.models import MoleculeModel
-from chemprop.nn_utils import NoamLR
+from chemprop.models import MoleculeModel, build_model
+from chemprop.nn_utils import NoamLR, CosineAnnealingWarmRestarts
 
 
 def makedirs(path: str, isfile: bool = False) -> None:
@@ -98,7 +98,7 @@ def load_checkpoint(path: str,
         args.device = device
 
     # Build model
-    model = MoleculeModel(args)
+    model = build_model(args)
     model_state_dict = model.state_dict()
 
     # Skip missing parameters and parameters of mismatched size
@@ -118,6 +118,16 @@ def load_checkpoint(path: str,
     # Load pretrained weights
     model_state_dict.update(pretrained_state_dict)
     model.load_state_dict(model_state_dict)
+
+    if getattr(args, 'transfer', False):
+        # Going to for now just freeze the encoding layer and train the other layers.
+        for name, param in model.named_parameters():
+            if 'encoder' in name:
+                param.requires_grad = False
+        
+        debug('Model layerName:requires_grad key-value:')
+        for name, param in model.named_parameters():
+            debug(f'{name}:{param.requires_grad}')
 
     if args.cuda:
         debug('Moving model to cuda')
@@ -168,6 +178,20 @@ def load_task_names(path: str) -> List[str]:
     return load_args(path).task_names
 
 
+def heteroscedastic_loss(true, mean, log_var):
+    """
+    Compute the heteroscedastic loss for regression.
+
+    :param true: A list of true values.
+    :param mean: A list of means (output predictions).
+    :param mean: A list of logvars (log of predicted variances).
+    :return: Computed loss.
+    """
+    precision = torch.exp(-log_var)
+    loss = precision * (true - mean)**2 + log_var
+    return loss
+
+
 def get_loss_func(args: TrainArgs) -> nn.Module:
     """
     Gets the loss function corresponding to a given dataset type.
@@ -178,9 +202,12 @@ def get_loss_func(args: TrainArgs) -> nn.Module:
     if args.dataset_type == 'classification':
         return nn.BCEWithLogitsLoss(reduction='none')
 
+    if args.dataset_type == 'regression' and args.aleatoric:
+        return heteroscedastic_loss
+
     if args.dataset_type == 'regression':
         return nn.MSELoss(reduction='none')
-    
+
     if args.dataset_type == 'multiclass':
         return nn.CrossEntropyLoss(reduction='none')
 
@@ -308,15 +335,23 @@ def build_lr_scheduler(optimizer: Optimizer, args: TrainArgs, total_epochs: List
     :return: An initialized learning rate scheduler.
     """
     # Learning rate scheduler
-    return NoamLR(
-        optimizer=optimizer,
-        warmup_epochs=[args.warmup_epochs],
-        total_epochs=total_epochs or [args.epochs] * args.num_lrs,
-        steps_per_epoch=args.train_data_size // args.batch_size,
-        init_lr=[args.init_lr],
-        max_lr=[args.max_lr],
-        final_lr=[args.final_lr]
-    )
+
+    if args.scheduler == 'noam':
+        return NoamLR(
+            optimizer=optimizer,
+            warmup_epochs=[args.warmup_epochs],
+            total_epochs=total_epochs or [args.epochs] * args.num_lrs,
+            steps_per_epoch=args.train_data_size // args.batch_size,
+            init_lr=[args.init_lr],
+            max_lr=[args.max_lr],
+            final_lr=[args.final_lr]
+        )
+    elif args.scheduler == 'sgdr':
+        return CosineAnnealingWarmRestarts(
+            optimizer=optimizer,
+            T_0=args.snapshot_ensembles,
+            eta_min=args.final_lr
+        )
 
 
 def create_logger(name: str, save_dir: str = None, quiet: bool = False) -> logging.Logger:

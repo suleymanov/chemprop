@@ -8,7 +8,8 @@ import torch.nn as nn
 from .mpn import MPN
 from chemprop.args import TrainArgs
 from chemprop.features import BatchMolGraph
-from chemprop.nn_utils import get_activation_function, initialize_weights
+from chemprop.nn_utils import get_activation_function, initialize_weights, get_cc_dropout_hyper
+from chemprop.models.concrete_dropout import ConcreteDropout, RegularizationAccumulator
 
 
 class MoleculeModel(nn.Module):
@@ -37,9 +38,12 @@ class MoleculeModel(nn.Module):
         if self.multiclass:
             self.multiclass_softmax = nn.Softmax(dim=2)
 
+        self.aleatoric = args.aleatoric
+        self.epistemic = args.epistemic
+        self.mc_dropout = self.epistemic == 'mc_dropout'
+
         self.create_encoder(args)
         self.create_ffn(args)
-
         initialize_weights(self)
 
     def create_encoder(self, args: TrainArgs) -> None:
@@ -69,31 +73,46 @@ class MoleculeModel(nn.Module):
         dropout = nn.Dropout(args.dropout)
         activation = get_activation_function(args.activation)
 
+        wd, dd = get_cc_dropout_hyper(args.train_data_size, args.regularization_scale)
+
         # Create FFN layers
         if args.ffn_num_layers == 1:
             ffn = [
                 dropout,
-                nn.Linear(first_linear_dim, self.output_size)
             ]
+            last_linear_dim = first_linear_dim
         else:
+            linear_layer = nn.Linear(first_linear_dim, args.ffn_hidden_size)
             ffn = [
                 dropout,
-                nn.Linear(first_linear_dim, args.ffn_hidden_size)
+                ConcreteDropout(layer=linear_layer,
+                                reg_acc=args.reg_acc, weight_regularizer=wd,
+                                dropout_regularizer=dd) if self.mc_dropout else linear_layer
+
             ]
             for _ in range(args.ffn_num_layers - 2):
+                linear_layer = nn.Linear(args.ffn_hidden_size, args.ffn_hidden_size)
                 ffn.extend([
                     activation,
                     dropout,
-                    nn.Linear(args.ffn_hidden_size, args.ffn_hidden_size),
+                    ConcreteDropout(layer=linear_layer,
+                                    reg_acc=args.reg_acc, weight_regularizer=wd,
+                                    dropout_regularizer=dd) if self.mc_dropout else linear_layer
                 ])
             ffn.extend([
                 activation,
                 dropout,
-                nn.Linear(args.ffn_hidden_size, self.output_size),
             ])
+            last_linear_dim = args.ffn_hidden_size
 
         # Create FFN model
-        self.ffn = nn.Sequential(*ffn)
+        self._ffn = nn.Sequential(*ffn)
+
+        if self.aleatoric:
+            self.output_layer = nn.Linear(last_linear_dim, self.output_size)
+            self.logvar_layer = nn.Linear(last_linear_dim, self.output_size)
+        else:
+            self.output_layer = nn.Linear(last_linear_dim, self.output_size)
 
     def featurize(self,
                   batch: Union[List[str], List[Chem.Mol], BatchMolGraph],
@@ -106,7 +125,7 @@ class MoleculeModel(nn.Module):
         :param features_batch: A list of numpy arrays containing additional features.
         :return: The feature vectors computed by the :class:`MoleculeModel`.
         """
-        return self.ffn[:-1](self.encoder(batch, features_batch))
+        return self._ffn[:-1](self.encoder(batch, features_batch))
 
     def forward(self,
                 batch: Union[List[str], List[Chem.Mol], BatchMolGraph],
@@ -123,7 +142,16 @@ class MoleculeModel(nn.Module):
         if self.featurizer:
             return self.featurize(batch, features_batch)
 
-        output = self.ffn(self.encoder(batch, features_batch))
+        _output = self._ffn(self.encoder(*input))
+
+        if self.aleatoric:
+            output = self.output_layer(_output)
+            logvar = self.logvar_layer(_output)
+
+            # Gaussian uncertainty only for regression, directly returning in this case
+            return output, logvar
+        else:
+            output = self.output_layer(_output)
 
         # Don't apply sigmoid during training b/c using BCEWithLogitsLoss
         if self.classification and not self.training:
@@ -134,3 +162,25 @@ class MoleculeModel(nn.Module):
                 output = self.multiclass_softmax(output)  # to get probabilities during evaluation, but not during training as we're using CrossEntropyLoss
 
         return output
+
+
+def build_model(args: TrainArgs) -> nn.Module:
+    """
+    Builds a MoleculeModel, which is a message passing neural network + feed-forward layers.
+
+    :param args: Arguments.
+    :return: A MoleculeModel containing the MPN encoder along with final linear layers with parameters initialized.
+    """
+    output_size = args.num_tasks
+    args.output_size = output_size
+    if args.dataset_type == 'multiclass':
+        args.output_size *= args.multiclass_num_classes
+
+    if args.epistemic == 'mc_dropout':
+            args.reg_acc = RegularizationAccumulator()
+
+    model = MoleculeModel(args)
+    if args.epistemic == 'mc_dropout':
+        args.reg_acc.initialize(cuda=args.cuda)
+
+    return model

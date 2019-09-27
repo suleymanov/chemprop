@@ -15,6 +15,13 @@ This repository contains message passing neural networks for molecular property 
 ## COVID-19 Update
 
 Please see [aicures.mit.edu](https://aicures.mit.edu) and the associated [data GitHub repo](https://github.com/yangkevin2/coronavirus_data) for information about our recent efforts to use Chemprop to identify drug candidates for treating COVID-19.
+# `chemprop` with uncertainty
+This branch extends the message passing neural networks for molecular property prediction as described in the paper [Analyzing Learned Molecular Representations for Property Prediction](https://pubs.acs.org/doi/abs/10.1021/acs.jcim.9b00237)
+with uncertainty, as described in the paper [Evaluating Scalable Uncertainty Estimation Methods for DNN-Based Molecular Property Prediction](https://arxiv.org/abs/1910.03127).
+
+This branch is currently under active development.
+
+For uncertainty-specific instructions and differences with respect to the base model see Section [Uncertainty Estimation](#uncertainty-estimation).
 
 ## Table of Contents
 
@@ -34,7 +41,7 @@ Please see [aicures.mit.edu](https://aicures.mit.edu) and the associated [data G
     * [RDKit 2D Features](#rdkit-2d-features)
     * [Custom Features](#custom-features)
 - [Predicting](#predicting)
-- [Interpreting Model Prediction](#Interpreting)
+- [Uncertainty Estimation](#uncertainty-estimation)
 - [TensorBoard](#tensorboard)
 - [Results](#results)
 
@@ -242,50 +249,77 @@ The output will be like the following:
 * The third column is the smallest substructure that made this molecule classified as toxic (which we call rationale). 
 * The fourth column is the predicted toxicity of that substructure. 
 
-As shown in the first row, when a molecule is predicted to be non-toxic, we will not provide any rationale for its prediction. 
+## Uncertainty Estimation
 
-smiles | NR-AR | rationale | rationale_score
-| :---: | :---: | :---: | :---: |
-O=\[N+\](\[O-\])c1cc(C(F)(F)F)cc(\[N+\](=O)\[O-\])c1Cl | 0.014 | | | 
-CC1(C)O\[C@@H\]2C\[C@H\]3\[C@@H\]4C\[C@H\](F)C5=CC(=O)C=C\[C@\]5(C)\[C@H\]4\[C@@H\](O)C\[C@\]3(C)\[C@\]2(C(=O)CO)O1 | 0.896 | C\[C@\]12C=CC(=O)C=C1\[CH2:1\]C\[CH2:1\]\[CH2:1\]2 | 0.769 |
-C\[C@\]12CC\[C@H\]3\[C@@H\](CC\[C@@\]45O\[C@@H\]4C(O)=C(C#N)C\[C@\]35C)\[C@@H\]1CC\[C@@H\]2O | 0.941 | C\[C@\]12C\[CH:1\]=\[CH:1\]\[C@H\]3O\[C@\]31CC\[C@@H\]1\[C@@H\]2CC\[C:1\]\[CH2:1\]1 | 0.808 |
-C\[C@\]12C\[C@H\](O)\[C@H\]3\[C@@H\](CCC4=CC(=O)CC\[C@@\]43C)\[C@@H\]1CC\[C@\]2(O)C(=O)COP(=O)(\[O-\])\[O-\] | 0.957 | C1C\[CH2:1\]\[C:1\]\[C@@H\]2\[C@@H\]1\[C@@H\]1CC\[C:1\]\[C:1\]1C\[CH2:1\]2</pre> | 0.532 | 
+This branch (`chemprop-uncertainty`) extends `chemprop` to output uncertainty estimates for each predicted property.
+In particular, the aleatoric and the epistemic uncertainty for each prediction can be output.
+See the paper [Evaluating Scalable Uncertainty Estimation Methods for DNN-Based Molecular Property Prediction](https://arxiv.org/abs/1910.03127)
+for more details about the meaning of these two types of uncertainty and the theory behind their computation with the different methods.
+
+
+Currently, using chemprop-uncertainty, for each predicted property three columns are output instead of one.
+For each predicted property `x` the model outputs the columns: `x`, `x_ale_unc` and `x_epi_unc`. This holds even if no uncertainty is computed: in this case, `x_ale_unc` and `x_epi_unc` default to 0.
 
 Chemprop's interpretation script explains model prediction one property at a time. `--property_id 1` tells the script to provide explanation for the first property in the dataset (which is NR-AR). In a multi-task training setting, you will need to change `--property_id` to provide explanation for each property in the dataset.
+Currently, uncertainty estimation is supported only for regression (`--dataset_type regression`).
 
-For computational efficiency, we currently restricted the rationale to have maximum 20 atoms and minimum 8 atoms. You can adjust these constraints through `--max_atoms` and `--min_atoms` argument.
+If no uncertainty-specific flag is provided, no uncertainty is estimated and the model behaves exactly as the base `chemprop` (with the only difference of the additional columns which default to 0).
+
+In the following the uncertainty-specific flags to add uncertainty calculation using different methods are described.
+
+### Aleatoric uncertainty
+
+Aleatoric uncertainty estimation (distributional parameter estimation, Gaussian distribution) can be added to the model by specifying `--aleatoric` during training.
+
+The  model trained with this additional parameter can be used to predict new molecules as usual. For each property `x`, the aleatoric uncertainty will be output in the `x_ale_unc` column.
+
+
+### Epistemic uncertainty
+
+#### Deep Ensembles
+
+To estimate epistemic uncertainty using deep ensembles:
+* Train the model as an ensemble (flag `--ensemble_size`, see [Ensembling](#ensembling))
+* Predict providing the flag `--estimate_variance`.
+
+For each property `x`, the epistemic uncertainty will be output in the `x_epi_unc` column.
+
+#### MC-Dropout
+
+To estimate epistemic uncertainty using MC-Dropout:
+* Train the model with the additional flag `--epistemic mc_dropout`. This changes the model to include MC-Dropout with Concrete Dropout. 
+* Predict specifying the `--sampling_size` flag. For example, `--sampling_size 20` corresponds to using 20 Monte Carlo samples.
+
+For each property `x`, the epistemic uncertainty will be output in the `x_epi_unc` column.
+
+Notice that in this implementation of MC-Dropout the dropout probability is not specified, since it is automatically learned using Concrete Dropout.
+When training with `--epistemic mc_dropout`, the additional flag `--regularization_scale` is available. This sets the regularization scale for Concrete Dropout (default: 1e-4). See the [Concrete Dropout paper](https://arxiv.org/abs/1705.07832) for more details about its usage.
+
+
+#### Bootstrapping
+
+To estimate epistemic uncertainty using bootstrapping:
+* Train the model as an ensemble (flag `--ensemble_size`, see [Ensembling](#ensembling)), specifying also the `--bootstrapping` flag.
+* Predict providing the flag `--estimate_variance`.
+
+For each property `x`, the epistemic uncertainty will be output in the `x_epi_unc` column.
+
+### Compute uncertainty in practice
+
+Aleatoric and epistemic uncertainty can be predicted together.
+
+Example: aleatoric uncertainty + deep ensembles (to predict epistemic uncertainty):
+```
+python train.py --dataset_type regression ... --aleatoric --ensemble_size N
+python predict.py ... --estimate_variance
+```
+
+Where `N` corresponds to the number of model's instances.
+
+In this case, for each property `x`, both `x_ale_unc` and `x_epi_unc` take values.
+
+
 
 ## TensorBoard
 
 During training, TensorBoard logs are automatically saved to the same directory as the model checkpoints. To view TensorBoard logs, run `tensorboard --logdir=<dir>` where `<dir>` is the path to the checkpoint directory. Then navigate to [http://localhost:6006](http://localhost:6006).
-
-## Results
-
-We compared our model against MolNet by Wu et al. on all of the MolNet datasets for which we could reproduce their splits (all but Bace, Toxcast, and qm7). When there was only one fold provided (scaffold split for BBBP and HIV), we ran our model multiple times and reported average performance. In each case we optimize hyperparameters on separate folds, use rdkit_2d_normalized features when useful, and compare to the best-performing model in MolNet as reported by Wu et al. We did not ensemble our model in these results.
-
-Results on regression datasets (lower is better)
-
-Dataset | Size | Metric | Ours | MolNet Best Model |
-| :---: | :---: | :---: | :---: | :---: |
-QM8 | 21,786 | MAE | 0.011 ± 0.000 | 0.0143 ± 0.0011 |
-QM9 | 133,885 | MAE | 2.666 ± 0.006 | 2.4 ± 1.1 |
-ESOL | 1,128 | RMSE | 0.555 ± 0.047 | 0.58 ± 0.03 |
-FreeSolv | 642 | RMSE | 1.075 ± 0.054 | 1.15 ± 0.12 |
-Lipophilicity | 4,200 | RMSE | 0.555 ± 0.023 | 0.655 ± 0.036 |
-PDBbind (full) | 9,880 | RMSE | 1.391 ± 0.012 | 1.25 ± 0 | 
-PDBbind (core) | 168 | RMSE | 2.173 ± 0.090 | 1.92 ± 0.07 | 
-PDBbind (refined) | 3,040 | RMSE | 1.486 ± 0.026 | 1.38 ± 0 | 
-
-Results on classification datasets (higher is better)
-
-| Dataset | Size | Metric | Ours | MolNet Best Model |
-| :---: | :---: | :---: | :---: | :---: |
-| PCBA | 437,928 | PRC-AUC | 0.335 ± 0.001 |  0.136 ± 0.004 |
-| MUV | 93,087 | PRC-AUC | 0.041 ± 0.007 | 0.184 ± 0.02 |
-| HIV | 41,127 | ROC-AUC | 0.776 ± 0.007 | 0.792 ± 0 |
-| BBBP | 2,039 | ROC-AUC | 0.737 ± 0.001 | 0.729 ± 0 |
-| Tox21 | 7,831 | ROC-AUC | 0.851 ± 0.002 | 0.829 ± 0.006 |
-| SIDER | 1,427 | ROC-AUC | 0.676 ± 0.014 | 0.648 ± 0.009 |
-| ClinTox | 1,478 | ROC-AUC | 0.864 ± 0.017 | 0.832 ± 0.037 |
-
-Lastly, you can find the code to our original repo at https://github.com/wengong-jin/chemprop and for the Mayr et al. baseline at https://github.com/yangkevin2/lsc_experiments . 
