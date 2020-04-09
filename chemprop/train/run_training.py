@@ -9,6 +9,7 @@ import torch
 from tqdm import trange
 from torch.optim.lr_scheduler import ExponentialLR
 import random
+from sklearn.preprocessing import QuantileTransformer
 
 from .evaluate import evaluate, evaluate_predictions
 from .predict import predict
@@ -20,8 +21,9 @@ from chemprop.models import MoleculeModel
 from chemprop.nn_utils import param_count
 from chemprop.utils import (
     build_optimizer, build_lr_scheduler, build_model,
-    get_loss_func, get_metric_func, load_checkpoint, makedirs, save_checkpoint, save_smiles_splits
+    get_loss_func, get_metric_func, load_checkpoint, makedirs, save_checkpoint, save_smiles_splits, get_avail_metrics
 )
+import time
 
 
 def run_training(args: TrainArgs, logger: Logger = None) -> List[float]:
@@ -108,7 +110,13 @@ def run_training(args: TrainArgs, logger: Logger = None) -> List[float]:
     if args.dataset_type == 'regression':
         debug('Fitting scaler')
         train_smiles, train_targets = train_data.smiles(), train_data.targets()
-        scaler = StandardScaler().fit(train_targets)
+        if args.quantile_transformer == 'none':
+            # do default scaling if quantile transformer is none
+            scaler = StandardScaler().fit(train_targets)
+        elif args.quantile_transformer == 'normal':
+            scaler = QuantileTransformer(n_quantiles=300, output_distribution='normal').fit(train_targets)
+        elif args.quantile_transformer == 'uniform':
+            scaler = QuantileTransformer(n_quantiles=300, output_distribution='uniform').fit(train_targets)
         scaled_targets = scaler.transform(train_targets).tolist()
         train_data.set_targets(scaled_targets)
     else:
@@ -160,6 +168,7 @@ def run_training(args: TrainArgs, logger: Logger = None) -> List[float]:
         debug(f'With class_balance, effective train size = {train_data_loader.iter_size:,}')
     if args.bootstrap:
         all_train_data = train_data
+    start_time = time.time()
 
     # Train ensemble of models
     for model_idx in range(args.ensemble_size):
@@ -316,6 +325,10 @@ def run_training(args: TrainArgs, logger: Logger = None) -> List[float]:
                 writer.add_scalar(f'test_{task_name}_{args.metric}', test_score, n_iter)
         writer.close()
 
+    time_elapsed = time.time() - start_time
+    info('Training complete in {:.0f}m {:.0f}s'.format(
+        time_elapsed // 60, time_elapsed % 60))
+
     # Evaluate ensemble on test set
     avg_test_preds = (sum_test_preds / args.ensemble_size).tolist()
 
@@ -328,6 +341,24 @@ def run_training(args: TrainArgs, logger: Logger = None) -> List[float]:
         logger=logger
     )
 
+    metric_scores = {}
+    # going to evaluate all metrics
+    if args.eval_all_metrics:
+        for m in get_avail_metrics(args.dataset_type):
+            cur_metric_func = get_metric_func(metric=m)
+            metric_scores[m] = evaluate_predictions(
+                preds=avg_test_preds,
+                targets=test_targets,
+                num_tasks=args.num_tasks,
+                metric_func=cur_metric_func,
+                dataset_type=args.dataset_type,
+                logger=logger
+            )
+            print(f'metric m = {metric_scores[m]} before')
+            # last entry is the mean for that metric
+            metric_scores[m].append(np.nanmean(np.array(metric_scores[m])))
+            print(f'metric m = {metric_scores[m]}')
+
     # Average ensemble score
     avg_ensemble_test_score = np.nanmean(ensemble_scores)
     info(f'Ensemble test {args.metric} = {avg_ensemble_test_score:.6f}')
@@ -337,4 +368,4 @@ def run_training(args: TrainArgs, logger: Logger = None) -> List[float]:
         for task_name, ensemble_score in zip(args.task_names, ensemble_scores):
             info(f'Ensemble test {task_name} {args.metric} = {ensemble_score:.6f}')
 
-    return ensemble_scores
+    return ensemble_scores, time_elapsed, len(test_smiles), metric_scores

@@ -11,7 +11,8 @@ from time import time
 from typing import Any, Callable, List, Tuple, Union
 
 from sklearn.metrics import auc, mean_absolute_error, mean_squared_error, precision_recall_curve, r2_score,\
-    roc_auc_score, accuracy_score, log_loss
+    roc_auc_score, accuracy_score, log_loss, matthews_corrcoef
+
 import torch
 import torch.nn as nn
 from torch.optim import Adam, Optimizer
@@ -60,15 +61,24 @@ def save_checkpoint(path: str,
     state = {
         'args': args,
         'state_dict': model.state_dict(),
-        'data_scaler': {
-            'means': scaler.means,
-            'stds': scaler.stds
-        } if scaler is not None else None,
         'features_scaler': {
             'means': features_scaler.means,
             'stds': features_scaler.stds
         } if features_scaler is not None else None
     }
+
+    if args.quantile_transformer == 'none':
+        state['data_scaler'] = {
+            'type': args.quantile_transformer,
+            'means': scaler.means,
+            'stds': scaler.stds
+        } if scaler is not None else None
+    else:
+        state['data_scaler'] = {
+            'type': args.quantile_transformer,
+            'params': scaler.get_params()
+        } if scaler is not None else None
+    
     torch.save(state, path)
 
 
@@ -125,6 +135,21 @@ def load_checkpoint(path: str,
             if 'encoder' in name:
                 param.requires_grad = False
         
+    if args.transfer_type > 0: # fine tune whole model is the default so can skip following if 0
+        
+        # first freeze the whole model
+        for name, param in model.named_parameters():
+            param.requires_grad = False
+        # then selectively unfreeze layers depending on transfer type
+        for name, param in model.named_parameters():
+            if args.transfer_type == 0.5 and 'ffn.7' in name:
+                param.requires_grad = True
+            if args.transfer_type >= 1 and 'ffn' in name:
+                param.requires_grad = True
+            if args.transfer_type >= 2 and 'encoder.encoder.W_o' in name:
+                param.requires_grad = True
+            if args.transfer_type >= 3 and 'encoder.encoder.W_h' in name:
+                param.requires_grad = True
         debug('Model layerName:requires_grad key-value:')
         for name, param in model.named_parameters():
             debug(f'{name}:{param.requires_grad}')
@@ -144,10 +169,12 @@ def load_scalers(path: str) -> Tuple[StandardScaler, StandardScaler]:
     :return: A tuple with the data :class:`~chemprop.data.scaler.StandardScaler`
              and features :class:`~chemprop.data.scaler.StandardScaler`.
     """
+    
     state = torch.load(path, map_location=lambda storage, loc: storage)
 
-    scaler = StandardScaler(state['data_scaler']['means'],
-                            state['data_scaler']['stds']) if state['data_scaler'] is not None else None
+
+    
+    scaler = StandardScaler(state['data_scaler']['means'], state['data_scaler']['stds']) if state['data_scaler'] is not None else None
     features_scaler = StandardScaler(state['features_scaler']['means'],
                                      state['features_scaler']['stds'],
                                      replace_nan_token=0) if state['features_scaler'] is not None else None
@@ -247,6 +274,21 @@ def mse(targets: List[float], preds: List[float]) -> float:
     """
     return mean_squared_error(targets, preds)
 
+def mcc(targets: List[int], preds: List[float], threshold: float = 0.5) -> float:
+    """
+    Computes the matthews_corrcoef of a binary prediction task using a given threshold for generating hard predictions.
+    Alternatively, compute matthews_corrcoef for a multiclass prediction task by picking the largest probability. 
+
+    :param targets: A list of binary targets.
+    :param preds: A list of prediction probabilities.
+    :param threshold: The threshold above which a prediction is a 1 and below which (inclusive) a prediction is a 0
+    :return: The computed matthews_corrcoef.
+    """
+    if type(preds[0]) == list: # multiclass
+        hard_preds = [p.index(max(p)) for p in preds]
+    else:
+        hard_preds = [1 if p > threshold else 0 for p in preds] # binary prediction
+    return matthews_corrcoef(targets, hard_preds)
 
 def accuracy(targets: List[int], preds: Union[List[float], List[List[float]]], threshold: float = 0.5) -> float:
     """
@@ -265,6 +307,15 @@ def accuracy(targets: List[int], preds: Union[List[float], List[List[float]]], t
         hard_preds = [1 if p > threshold else 0 for p in preds]  # binary prediction
 
     return accuracy_score(targets, hard_preds)
+
+def get_avail_metrics(metricType: str):
+    if metricType == 'classification':
+        return ['auc', 'prc-auc', 'mcc', 'accuracy']
+    elif metricType == 'regression':
+        return ['rmse', 'mse', 'mae', 'r2']
+    elif metricType == 'multiclass':
+        return ['cross_entropy', 'accuracy']
+    return [] # if none of the above
 
 
 def get_metric_func(metric: str) -> Callable[[Union[List[int], List[float]], List[float]], float]:
@@ -290,6 +341,9 @@ def get_metric_func(metric: str) -> Callable[[Union[List[int], List[float]], Lis
 
     if metric == 'prc-auc':
         return prc_auc
+
+    if metric == 'mcc':
+        return mcc
 
     if metric == 'rmse':
         return rmse

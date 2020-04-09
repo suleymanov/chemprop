@@ -224,6 +224,21 @@ class TrainArgs(CommonArgs):
     ensemble_size: int = 1
     """Number of models in ensemble."""
 
+    transfer: bool = False  # Use transfer learning with the passed model
+    transfer_type: Literal[0.0, 0.5, 1, 2, 3] = 0.0  # Fine tune type
+    quantile_transformer: Literal['none', 'normal', 'uniform', 'all'] = 'none'  # Transformer for regression data
+    sqlite_db: str = 'none'  # sqlite db to save results
+    exp_name: str = 'none'  # Experiment name
+    excel_file: str = 'none'  # Excel file to save results to
+    eval_all_metrics: bool = False  # Evaluate all the available metrics
+
+    # parser.add_argument('--transfer_type', type=float, default=0.0,
+    #                     help='0: fine tune entire model.'
+    #                          '0.5: fine tune only the output layer of ff'
+    #                          '1: fine tune ff layers.'
+    #                          '2: fine tune encoding output and ff layers.' 
+    #                          '3: fine tune hidden and output encoding and ff layers.')
+
     # Training arguments
     epochs: int = 30
     """Number of epochs to run."""

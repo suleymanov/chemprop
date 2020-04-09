@@ -3,6 +3,7 @@ import os
 from typing import Tuple
 
 import numpy as np
+import pandas as pd
 
 from .run_training import run_training
 from chemprop.args import TrainArgs
@@ -38,15 +39,56 @@ def cross_validate(args: TrainArgs) -> Tuple[float, float]:
 
     # Run training on different random seeds for each fold
     all_scores = []
+    all_times = []
+    all_availScores = []
+    all_numTestSmiles = [] # don't bother 
     for fold_num in range(args.num_folds):
         info(f'Fold {fold_num}')
         args.seed = init_seed + fold_num
         args.save_dir = os.path.join(save_dir, f'fold_{fold_num}')
         makedirs(args.save_dir)
-        model_scores = run_training(args, logger)
-        all_scores.append(model_scores)
-    all_scores = np.array(all_scores)
+        model_scores, time_elapsed, numTestSmiles, allMetricScores = run_training(args, logger)
+        if args.eval_all_metrics:
+            df = pd.DataFrame(allMetricScores)
+            t2 = task_names.copy()
+            t2.append('mean')
+            df.index = t2
+            df['fold'] = fold_num
+            all_availScores.append(df)
 
+        all_scores.append(model_scores)
+        all_times.append(time_elapsed)
+        all_numTestSmiles.append(numTestSmiles)
+    all_scores = np.array(all_scores)
+    all_times = np.array(all_times)
+    
+    if args.eval_all_metrics:
+        allScoreData = pd.concat(all_availScores)
+        by_row_index = allScoreData.groupby(allScoreData.index)
+        df_means = by_row_index.mean()
+        df_std = by_row_index.std()
+        # now we have a dataframe with:
+        # Columns are the metric
+        # rows are the tasks
+        # the last row I've appended the mean of the tasks
+        # therefore df_means has a row 'means' that has the mean
+        # of the tasks accross all the folds
+        # and df_std has a row std_of_mean that is the standard deviation
+        # of the score for each model accross the tasks
+        t3 = task_names.copy()
+        t3.append('total_mean')
+        t4 = task_names.copy()
+        t4.append('std_of_total_mean')
+        df_means.index = t3 #task_names.append('total_mean')
+        df_std.index = t4 #task_names.append('std_of_total_mean')
+
+        # drop the fold column
+        df_means = df_means.drop(columns=['fold'])
+        df_std = df_std.drop(columns=['fold'])
+        # now going to concat the overall average accross the tasks
+        # df_means = df_means.append(df_means.agg(['mean']))
+    else:
+        df_means = df_std = allScoreData = None
     # Report results
     info(f'{args.num_folds}-fold cross validation')
 
@@ -61,6 +103,8 @@ def cross_validate(args: TrainArgs) -> Tuple[float, float]:
     # Report scores across models
     avg_scores = np.nanmean(all_scores, axis=1)  # average score for each model across tasks
     mean_score, std_score = np.nanmean(avg_scores), np.nanstd(avg_scores)
+    mean_time, std_time = np.nanmean(all_times), np.nanstd(all_times)
+    info('Overall average training time: {:.0f}m {:.0f}s and std +/- {:.0f}m {:.0f}s'.format(mean_time // 60, mean_time % 60, std_time // 60, std_time % 60))
     info(f'Overall test {args.metric} = {mean_score:.6f} +/- {std_score:.6f}')
 
     if args.show_individual_scores:
@@ -79,7 +123,7 @@ def cross_validate(args: TrainArgs) -> Tuple[float, float]:
             mean, std = np.nanmean(task_scores), np.nanstd(task_scores)
             writer.writerow([task_name, mean, std] + task_scores.tolist())
 
-    return mean_score, std_score
+    return mean_score, std_score, mean_time, std_time, all_numTestSmiles[0]
 
 
 def chemprop_train() -> None:
