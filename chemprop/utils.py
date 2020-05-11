@@ -4,6 +4,7 @@ from datetime import timedelta
 from functools import wraps
 import logging
 import math
+import json
 import os
 import pickle
 from time import time
@@ -448,3 +449,20 @@ def save_smiles_splits(train_data: MoleculeDataset,
 
     with open(os.path.join(save_dir, 'split_indices.pckl'), 'wb') as f:
         pickle.dump(all_split_indices, f)
+
+
+def save_metrics(mean_score: float, std_score: float, logger: logging.Logger = None):
+    """
+    Saves the model metrics in json file for DVC metrics usage
+
+    :param mean_score: Mean test metric of the trained model
+    :param std_score: Standard dev metric of the trained model
+    :param save_dir: model output directory
+    :param logger: A logger.
+    """
+    info = logger.info if logger is not None else print
+    metrics_json = {'mean_sWcore': mean_score, 'std_score': std_score}
+    
+    with open('metrics.json', 'w') as fp:
+        info("Saving metrics")
+        json.dump(metrics_json, fp)

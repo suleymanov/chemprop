@@ -5,6 +5,7 @@
 *.csv
 *.pt
 *.json
+*.log
 *.sqlite3
 chemprop.egg-info
 docs/build
