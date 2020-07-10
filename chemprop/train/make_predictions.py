@@ -43,6 +43,8 @@ def make_predictions(args: PredictArgs, smiles: List[str] = None) -> List[List[O
     args: Union[PredictArgs, TrainArgs]
 
     print('Loading data')
+    if args.smiles and smiles is None:
+        smiles = args.smiles
     if smiles is not None:
         full_data = get_data_from_smiles(
             smiles=smiles,
@@ -153,47 +155,39 @@ def make_predictions(args: PredictArgs, smiles: List[str] = None) -> List[List[O
     avg_preds = full_preds
     avg_ale_uncs = full_ale_uncs
     avg_epi_uncs = full_epi_uncs
-
     test_smiles = full_data.smiles()
 
     # Write predictions
-    with open(args.preds_path, 'w') as f:
-        writer = csv.writer(f)
-
-        header = []
-        header.append('smiles')
-
-        if args.dataset_type == 'multiclass':
-            for name in task_names:
-                for i in range(args.multiclass_num_classes):
-                    header.append(name + '_class' + str(i))
-        else:
-            header.extend(task_names)
-            header.extend([tn + "_ale_unc" for tn in task_names])
-            header.extend([tn + "_epi_unc" for tn in task_names])
-
-        writer.writerow(header)
-
-        for i in range(len(avg_preds)):
-            row = []
-            row.append(test_smiles[i])
-
-            if avg_preds[i] is not None:
-                if args.dataset_type == 'multiclass':
-                    for task_probs in avg_preds[i]:
-                        row.extend(task_probs)
-                else:
-                    row.extend(avg_preds[i])
-                    row.extend(avg_ale_uncs[i])
-                    row.extend(avg_epi_uncs[i])
+    if args.preds_path:
+        with open(args.preds_path, 'w') as f:
+            writer = csv.writer(f)
+            header = ['smiles']
+            if args.dataset_type == 'multiclass':
+                for name in task_names:
+                    for i in range(args.multiclass_num_classes):
+                        header.append(name + '_class' + str(i))
             else:
-                if args.dataset_type == 'multiclass':
-                    row.extend([''] * num_tasks * args.multiclass_num_classes)
+                header.extend(task_names)
+                header.extend([tn + "_ale_unc" for tn in task_names])
+                header.extend([tn + "_epi_unc" for tn in task_names])
+            writer.writerow(header)
+            for i in range(len(avg_preds)):
+                row = [test_smiles[i]]
+                if avg_preds[i] is not None:
+                    if args.dataset_type == 'multiclass':
+                        for task_probs in avg_preds[i]:
+                            row.extend(task_probs)
+                    else:
+                        row.extend(avg_preds[i])
+                        row.extend(avg_ale_uncs[i])
+                        row.extend(avg_epi_uncs[i])
                 else:
-                    # Both the prediction, the aleatoric uncertainty and the epistemic uncertainty are None
-                    row.extend([''] * 3 * num_tasks)
-
-            writer.writerow(row)
+                    if args.dataset_type == 'multiclass':
+                        row.extend([''] * num_tasks * args.multiclass_num_classes)
+                    else:
+                        # Both the prediction, the aleatoric uncertainty and the epistemic uncertainty are None
+                        row.extend([''] * 3 * num_tasks)
+                writer.writerow(row)
 
     return avg_preds
 

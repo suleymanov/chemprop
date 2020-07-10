@@ -418,6 +418,8 @@ class TrainArgs(CommonArgs):
 class PredictArgs(CommonArgs):
     """:class:`PredictArgs` includes :class:`CommonArgs` along with additional arguments used for predicting with a Chemprop model."""
 
+    smiles: List[str] = None
+    """SMILES list."""
     test_path: str
     """Path to CSV file containing testing data for which predictions will be made."""
     preds_path: str
