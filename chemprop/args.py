@@ -224,7 +224,6 @@ class TrainArgs(CommonArgs):
     ensemble_size: int = 1
     """Number of models in ensemble."""
 
-    transfer: bool = False  # Use transfer learning with the passed model
     transfer_type: Literal[0.0, 0.5, 1, 2, 3] = 0.0  # Fine tune type
     quantile_transformer: Literal['none', 'normal', 'uniform', 'all'] = 'none'  # Transformer for regression data
     sqlite_db: str = 'none'  # sqlite db to save results
@@ -269,6 +268,18 @@ class TrainArgs(CommonArgs):
     """Sampling size for MC-Dropout."""
     scheduler: Literal['noam', 'sgdr'] = 'noam'
     """Scheduler type."""
+    aleatoric: bool = False
+    """Compute aleatoric uncertainty."""
+    epistemic: bool = False
+    """Compute epistemic uncertainty with a specified method."""
+    regularization_scale: float = 1e-4
+    """Concrete dropout regularization scale."""
+    sampling_size: int = 20
+    """Sampling size for MC-Dropout."""
+    scheduler: Literal['noam', 'sgdr'] = 'noam'
+    """Scheduler type."""
+    snapshot_ensemble_size: int = 5
+    """Snapshot ensemble size."""
 
     def __init__(self, *args, **kwargs) -> None:
         super(TrainArgs, self).__init__(*args, **kwargs)
