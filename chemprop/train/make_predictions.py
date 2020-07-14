@@ -188,8 +188,8 @@ def make_predictions(args: PredictArgs, smiles: List[str] = None) -> List[List[O
                         # Both the prediction, the aleatoric uncertainty and the epistemic uncertainty are None
                         row.extend([''] * 3 * num_tasks)
                 writer.writerow(row)
-
-    return avg_preds
+                
+    return avg_preds, avg_ale_uncs, avg_epi_uncs
 
 
 def chemprop_predict() -> None:

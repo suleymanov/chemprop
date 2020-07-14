@@ -360,7 +360,7 @@ def predict():
     args = PredictArgs().parse_args(arguments)
 
     # Run predictions
-    preds = make_predictions(args=args, smiles=smiles)
+    preds, _, _ = make_predictions(args=args, smiles=smiles)
 
     if all(p is None for p in preds):
         return render_predict(errors=['All SMILES are invalid'])
