@@ -7,6 +7,5 @@ from chemprop.utils import create_logger, save_metrics
 
 if __name__ == '__main__':
     args = TrainArgs().parse_args()
-    logger = create_logger(name='train', save_dir=args.save_dir, quiet=args.quiet)
-    mean_score, std_score, _, _, _ = cross_validate(args, logger)
-    save_metrics(mean_score, std_score, logger)
+    mean_score, std_score, _, _, _ = cross_validate(args)
+    save_metrics(mean_score, std_score)

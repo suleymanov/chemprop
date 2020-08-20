@@ -84,16 +84,16 @@ def make_predictions(args: PredictArgs, smiles: List[str] = None) -> List[List[O
     # Predict with each model individually and sum predictions
     if args.dataset_type == 'multiclass':
         sum_preds = np.zeros((len(test_data), num_tasks, args.multiclass_num_classes))
-        sum_ale_uncs = np.zeros((len(test_data), num_tasks, args.multiclass_num_classes))
-        sum_epi_uncs = np.zeros((len(test_data), num_tasks, args.multiclass_num_classes))
     else:
         sum_preds = np.zeros((len(test_data), num_tasks))
+    if args.dataset_type == 'regression':
         sum_ale_uncs = np.zeros((len(test_data), num_tasks))
         sum_epi_uncs = np.zeros((len(test_data), num_tasks))
+    else:
+        sum_ale_uncs, sum_epi_uncs = None, None
 
     # Partial results for variance robust calculation.
     all_preds = np.zeros((len(test_data), num_tasks, len(args.checkpoint_paths)))
-
     test_data_loader = MoleculeDataLoader(
         dataset=test_data,
         batch_size=args.batch_size,
@@ -112,53 +112,58 @@ def make_predictions(args: PredictArgs, smiles: List[str] = None) -> List[List[O
             sampling_size=args.sampling_size
         )
         sum_preds += np.array(model_preds)
-        if ale_uncs is not None:
-            sum_ale_uncs += np.array(ale_uncs)
-        if epi_uncs is not None:
-            sum_epi_uncs += np.array(epi_uncs)
-        if args.estimate_variance:
-            all_preds[:, :, index] = model_preds
+        if args.dataset_type == 'regression':
+            if ale_uncs is not None:
+                sum_ale_uncs += np.array(ale_uncs)
+            if epi_uncs is not None:
+                sum_epi_uncs += np.array(epi_uncs)
+            if args.estimate_variance:
+                all_preds[:, :, index] = model_preds
 
     avg_preds = sum_preds / len(args.checkpoint_paths)
     avg_preds = avg_preds.tolist()
-    avg_ale_uncs = sum_ale_uncs / len(args.checkpoint_paths)
-    avg_ale_uncs = avg_ale_uncs.tolist()
-    if args.estimate_variance:
-        # Use ensemble variance to estimate uncertainty. This overwrites existing uncertainty estimates.
-        # preds <- mean(preds), ale_uncs <- mean(ale_uncs), epi_uncs <- var(preds)
-        avg_epi_uncs = np.var(all_preds, axis=2)
+    if args.dataset_type == 'regression':
+        avg_ale_uncs = sum_ale_uncs / len(args.checkpoint_paths)
+        avg_ale_uncs = avg_ale_uncs.tolist()
+        avg_epi_uncs = (
+            np.var(all_preds, axis=2)
+            if args.estimate_variance else
+            sum_epi_uncs / len(args.checkpoint_paths)
+        )
         avg_epi_uncs = avg_epi_uncs.tolist()
     else:
-        # Use another method to estimate uncertainty.
-        # preds <- mean(preds), ale_uncs <- mean(ale_uncs), epi_uncs <- mean(epi_uncs)
-        avg_epi_uncs = sum_epi_uncs / len(args.checkpoint_paths)
-        avg_epi_uncs = avg_epi_uncs.tolist()
+        avg_ale_uncs, avg_epi_uncs = None, None
 
     # Save predictions
     assert len(test_data) == len(avg_preds)
-    assert len(test_data) == len(avg_ale_uncs)
-    assert len(test_data) == len(avg_epi_uncs)
+    if args.dataset_type == 'regression':
+        assert len(test_data) == len(avg_ale_uncs)
+        assert len(test_data) == len(avg_epi_uncs)
 
     print(f'Saving predictions to {args.preds_path}')
     makedirs(args.preds_path, isfile=True)
-
     # Put Nones for invalid smiles
     full_preds = [None] * len(full_data)
-    full_ale_uncs = [None] * len(full_data)
-    full_epi_uncs = [None] * len(full_data)
-
     for i, si in full_to_valid_indices.items():
         full_preds[si] = avg_preds[i]
-        full_ale_uncs[si] = avg_ale_uncs[i]
-        full_epi_uncs[si] = avg_epi_uncs[i]
-
     avg_preds = full_preds
-    avg_ale_uncs = full_ale_uncs
-    avg_epi_uncs = full_epi_uncs
     test_smiles = full_data.smiles()
+    if args.dataset_type == 'regression':
+        full_ale_uncs = [None] * len(full_data)
+        full_epi_uncs = [None] * len(full_data)
+        for i, si in full_to_valid_indices.items():
+            full_ale_uncs[si] = avg_ale_uncs[i]
+            full_epi_uncs[si] = avg_epi_uncs[i]
+        avg_ale_uncs = full_ale_uncs
+        avg_epi_uncs = full_epi_uncs
 
     # Write predictions
     if args.preds_path:
+        num_empty = num_tasks * (
+            args.multiclass_num_classes
+            if args.dataset_type == 'multiclass' else 
+            3 if args.dataset_type == 'regression' else 1
+        )
         with open(args.preds_path, 'w') as f:
             writer = csv.writer(f)
             header = ['smiles']
@@ -168,8 +173,9 @@ def make_predictions(args: PredictArgs, smiles: List[str] = None) -> List[List[O
                         header.append(name + '_class' + str(i))
             else:
                 header.extend(task_names)
-                header.extend([tn + "_ale_unc" for tn in task_names])
-                header.extend([tn + "_epi_unc" for tn in task_names])
+                if args.dataset_type == 'regression':
+                    header.extend([tn + '_ale_unc' for tn in task_names])
+                    header.extend([tn + '_epi_unc' for tn in task_names])
             writer.writerow(header)
             for i in range(len(avg_preds)):
                 row = [test_smiles[i]]
@@ -179,16 +185,12 @@ def make_predictions(args: PredictArgs, smiles: List[str] = None) -> List[List[O
                             row.extend(task_probs)
                     else:
                         row.extend(avg_preds[i])
-                        row.extend(avg_ale_uncs[i])
-                        row.extend(avg_epi_uncs[i])
+                        if args.dataset_type == 'regression':
+                            row.extend(avg_ale_uncs[i])
+                            row.extend(avg_epi_uncs[i])
                 else:
-                    if args.dataset_type == 'multiclass':
-                        row.extend([''] * num_tasks * args.multiclass_num_classes)
-                    else:
-                        # Both the prediction, the aleatoric uncertainty and the epistemic uncertainty are None
-                        row.extend([''] * 3 * num_tasks)
+                    row.extend([''] * num_empty)
                 writer.writerow(row)
-                
     return avg_preds, avg_ale_uncs, avg_epi_uncs
 
 

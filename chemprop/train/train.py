@@ -50,24 +50,27 @@ def train(model: MoleculeModel,
         mol_batch, features_batch, target_batch = batch.batch_graph(), batch.features(), batch.targets()
         mask = torch.Tensor([[x is not None for x in tb] for tb in target_batch])
         targets = torch.Tensor([[0 if x is None else x for x in tb] for tb in target_batch])
-
         class_weights = torch.ones(targets.shape)
-        if args.cuda:
-            class_weights = class_weights.cuda()
 
         # Run model
         model.zero_grad()
+        preds = model(mol_batch, features_batch)
+        preds_device = (preds[0] if isinstance(preds, tuple) else preds).device
+        targets = targets.to(preds_device)
+        mask = mask.to(preds_device)
+        class_weights = class_weights.to(preds_device)
 
         if not args.aleatoric:
-            preds = model(mol_batch, features_batch)
-
             if args.dataset_type == 'multiclass':
                 targets = targets.long()
-                loss = torch.cat([loss_func(preds[:, target_index, :], targets[:, target_index]).unsqueeze(1) for target_index in range(preds.size(1))], dim=1) * class_weights * mask
+                loss = torch.cat([
+                    loss_func(preds[:, target_index, :], targets[:, target_index]).unsqueeze(1) 
+                    for target_index in range(preds.size(1))
+                ], dim=1) * class_weights * mask
             else:
                 loss = loss_func(preds, targets) * class_weights * mask
         else:
-            means, logvars = model(mol_batch, features_batch)
+            means, logvars = preds
             loss = loss_func(targets, means, logvars) * class_weights * mask
 
         loss = loss.sum() / mask.sum()

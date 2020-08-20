@@ -142,7 +142,8 @@ class MoleculeModel(nn.Module):
         if self.featurizer:
             return self.featurize(batch, features_batch)
 
-        _output = self._ffn(self.encoder(*input))
+        # _output = self._ffn(self.encoder(*input))
+        _output = self._ffn(self.encoder(batch, features_batch))
 
         if self.aleatoric:
             output = self.output_layer(_output)
